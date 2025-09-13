@@ -1,0 +1,12 @@
+endpoints:
+  - name: cli-quickstart
+    url: livia-uncountervailed-craunchingly.ngrok-free.app
+    traffic_policy:
+      on_http_request:
+        - actions:
+          - type: oauth
+            config:
+              provider: google
+    upstream:
+      url: 8080
+      protocol: http1
