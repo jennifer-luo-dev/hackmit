@@ -72,6 +72,7 @@ class ExampleMentraOSApp extends AppServer {
   private latestPhotoTimestamp: Map<string, number> = new Map(); // Track latest photo timestamp per user
   private isStreamingPhotos: Map<string, boolean> = new Map(); // Track if we are streaming photos for a user
   private nextPhotoTime: Map<string, number> = new Map(); // Track next photo time for a user
+  private sessionMap: Map<string, AppSession> = new Map(); // CHANGE 1: Store session references
 
   constructor() {
     super({
@@ -97,6 +98,7 @@ class ExampleMentraOSApp extends AppServer {
     // initialize state
     this.isStreamingPhotos.set(userId, false);
     this.nextPhotoTime.set(userId, Date.now());
+    this.sessionMap.set(userId, session); // CHANGE 2: Store session reference
 
     // button press handling
     session.events.onButtonPress(async (button) => {
@@ -122,7 +124,7 @@ class ExampleMentraOSApp extends AppServer {
           this.logger.info(
             `Photo taken for user ${userId}, timestamp: ${photo.timestamp}`
           );
-          await this.cachePhoto(photo, userId); // ← make sure we await (writing file)
+          await this.cachePhoto(photo, userId, session); // CHANGE 3: Pass session to cachePhoto
         } catch (error) {
           this.logger.error(`Error taking photo: ${error}`);
         }
@@ -135,11 +137,16 @@ class ExampleMentraOSApp extends AppServer {
         this.isStreamingPhotos.get(userId) &&
         Date.now() > (this.nextPhotoTime.get(userId) ?? 0)
       ) {
+        this.logger.info(`DEBUG: Auto-stream triggered for user ${userId}`);
         try {
           this.nextPhotoTime.set(userId, Date.now() + 30000);
+          this.logger.info(`DEBUG: Auto-stream - requesting photo for user ${userId}`);
           const photo = await session.camera.requestPhoto();
+          this.logger.info(`DEBUG: Auto-stream photo captured for user ${userId}, timestamp: ${photo.timestamp}`);
           this.nextPhotoTime.set(userId, Date.now());
-          await this.cachePhoto(photo, userId); // ← await here too
+          this.logger.info(`DEBUG: About to cache auto-stream photo and potentially trigger follow-up`);
+          await this.cachePhoto(photo, userId, session); // CHANGE 4: Pass session here too
+          this.logger.info(`DEBUG: Auto-stream cachePhoto completed`);
         } catch (error) {
           this.logger.error(`Error auto-taking photo: ${error}`);
         }
@@ -151,12 +158,14 @@ class ExampleMentraOSApp extends AppServer {
     this.logger.info("Session stopped, cleaning up user state");
     this.isStreamingPhotos.clear();
     this.nextPhotoTime.clear();
+    this.sessionMap.clear(); // CHANGE 5: Clear session references
   }
 
   /**
    * Cache a photo for display AND save it to disk under snapshots/
+   * CHANGE 6: Modified to take another photo after saving
    */
-  private async cachePhoto(photo: PhotoData, userId: string) {
+  private async cachePhoto(photo: PhotoData, userId: string, session?: AppSession) {
     // Build a filename and write to disk first
     const ext = extFromMime(photo.mimeType);
     const ts = safeTimestamp(photo.timestamp ?? new Date());
@@ -166,6 +175,19 @@ class ExampleMentraOSApp extends AppServer {
     try {
       await fs.writeFile(fullPath, photo.buffer);
       this.logger.info(`Photo saved to file: ${fullPath}`);
+      
+      // CHANGE 7: Take another photo after successful save
+      if (session) {
+        try {
+          this.logger.info(`Taking follow-up photo for user ${userId}`);
+          const nextPhoto = await session.camera.requestPhoto();
+          this.logger.info(`Follow-up photo taken for user ${userId}, timestamp: ${nextPhoto.timestamp}`);
+          // Save the follow-up photo (but don't trigger another one to avoid infinite loop)
+          await this.savePhotoOnly(nextPhoto, userId);
+        } catch (error) {
+          this.logger.error(`Error taking follow-up photo: ${error}`);
+        }
+      }
     } catch (e) {
       this.logger.error(`Failed to save photo to file: ${e}`);
       // continue anyway; we still keep it in memory
@@ -190,6 +212,44 @@ class ExampleMentraOSApp extends AppServer {
     this.latestPhotoTimestamp.set(userId, cachedPhoto.timestamp.getTime());
     this.logger.info(
       `Photo cached for user ${userId}, timestamp: ${cachedPhoto.timestamp}`
+    );
+  }
+
+  /**
+   * CHANGE 8: New helper method to save photo without triggering another photo
+   */
+  private async savePhotoOnly(photo: PhotoData, userId: string) {
+    // Build a filename and write to disk
+    const ext = extFromMime(photo.mimeType);
+    const ts = safeTimestamp(photo.timestamp ?? new Date());
+    const baseName = `photo_${ts}_${photo.requestId ?? "unknown"}${ext}`;
+    const fullPath = path.join(SNAPSHOTS_DIR, baseName);
+
+    try {
+      await fs.writeFile(fullPath, photo.buffer);
+      this.logger.info(`Follow-up photo saved to file: ${fullPath}`);
+    } catch (e) {
+      this.logger.error(`Failed to save follow-up photo to file: ${e}`);
+      return; // Don't cache if file save failed
+    }
+
+    const cachedPhoto: StoredPhoto = {
+      requestId: photo.requestId,
+      buffer: photo.buffer,
+      timestamp: photo.timestamp,
+      userId,
+      mimeType: photo.mimeType,
+      filename: baseName,
+      size: photo.size,
+    };
+
+    const list = this.photos.get(userId) ?? [];
+    list.unshift(cachedPhoto);
+    if (list.length > 50) list.length = 50;
+    this.photos.set(userId, list);
+    this.latestPhotoTimestamp.set(userId, cachedPhoto.timestamp.getTime());
+    this.logger.info(
+      `Follow-up photo cached for user ${userId}, timestamp: ${cachedPhoto.timestamp}`
     );
   }
 
