@@ -7,6 +7,16 @@ import {
 import * as ejs from "ejs";
 import * as path from "path";
 import { promises as fs } from "fs"; // ← ADD
+import admin from "firebase-admin"; // to import firebase
+
+
+// Firebase initialisation
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+    storageBucket: process.env.FIREBASE_BUCKET, // to be added to .env FIREBASE_BUCKET, unable to do it due to inaccess
+  });
+}
 
 /**
  * Interface representing a stored photo with metadata
@@ -49,6 +59,8 @@ async function ensureSnapshotsDirExists(logger: { info: Function; warn: Function
     logger.warn(`Could not create snapshots directory: ${e}`);
   }
 }
+
+
 // === end helpers ===
 
 const PACKAGE_NAME =
@@ -165,6 +177,30 @@ class ExampleMentraOSApp extends AppServer {
    * Cache a photo for display AND save it to disk under snapshots/
    * CHANGE 6: Modified to take another photo after saving
    */
+
+  private async uploadToFirebase(cachedPhoto: StoredPhoto) {
+    const filePath = path.join(SNAPSHOTS_DIR, cachedPhoto.filename);
+    const destination = `sessions/${cachedPhoto.userId}/images/${cachedPhoto.filename}`;
+  
+    try {
+      await bucket.upload(filePath, {
+        destination,
+        metadata: {
+          contentType: cachedPhoto.mimeType,
+          metadata: {
+            userId: cachedPhoto.userId,
+            requestId: cachedPhoto.requestId,
+            timestamp: cachedPhoto.timestamp.toISOString(),
+          },
+        },
+      });
+      this.logger.info(`Uploaded ${cachedPhoto.filename} to Firebase at ${destination}`);
+    } catch (err) {
+      this.logger.error(`Firebase upload failed for ${cachedPhoto.filename}: ${err}`);
+    }
+  }
+
+  
   private async cachePhoto(photo: PhotoData, userId: string, session?: AppSession) {
     // Build a filename and write to disk first
     const ext = extFromMime(photo.mimeType);
@@ -213,6 +249,9 @@ class ExampleMentraOSApp extends AppServer {
     this.logger.info(
       `Photo cached for user ${userId}, timestamp: ${cachedPhoto.timestamp}`
     );
+
+    await this.uploadToFirebase(cachedPhoto); //upload cached photos to firebase
+
   }
 
   /**
@@ -251,6 +290,8 @@ class ExampleMentraOSApp extends AppServer {
     this.logger.info(
       `Follow-up photo cached for user ${userId}, timestamp: ${cachedPhoto.timestamp}`
     );
+    await this.uploadToFirebase(cachedPhoto); // upload to firebase // format undetermined
+
   }
 
   /**
